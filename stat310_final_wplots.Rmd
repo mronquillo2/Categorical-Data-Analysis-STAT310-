@@ -1,0 +1,515 @@
+---
+title: "stat310_final"
+author: "Rob Sisto"
+date: "2023-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = FALSE)
+#knitr::opts_knit$set(root.dir = "/home/risto/Nextcloud/stat_351(488)/project/data")
+#setwd("/home/risto/Nextcloud/stats_310(410)/project")
+```
+
+# Start of Code - delete later
+
+```{r import libraries}
+#TODO make sure all set.seeds are 261
+library(psych)
+library(VGAM)
+library(pROC)
+library(MASS)
+library(gam)
+library(car)
+library(knitr)
+library(tidyverse)
+
+```
+
+```{r data input & preprocessing}
+mat = read.csv("/Users/melchorronquillo/Desktop/Files/STAT310/student-mat.csv")
+por = read.csv("/Users/melchorronquillo/Desktop/Files/STAT310/student-por.csv")
+alcohol = rbind(mat, por)
+
+alcohol['alc_con'] = alcohol$Walc + alcohol$Dalc
+alcohol = subset(alcohol, select=-c(Walc, Dalc))
+response = data.frame(alc_con=alcohol$alc_con)
+  
+#converting all of these numerical variables to ordinal ones
+convert.to.ordinal = c('Medu', 'Fedu', 'traveltime', 'studytime', 'famrel', 'freetime', 'goout', 'health', 'failures')
+for (c in convert.to.ordinal){
+  alcohol[c] = factor(unlist(alcohol[c], use.names=F), order=T)
+}  
+
+
+#converting all these variables to factors
+convert.to.factor = c("romantic", "internet", "higher", "nursery", "activities", "paid", "famsup", "schoolsup", "guardian", "reason", "Fjob", "Mjob", "Pstatus", "famsize", "address", "sex", "school")
+for (c in convert.to.factor){
+  alcohol[c] = factor(unlist(alcohol[c], use.names=F))
+}  
+
+old.age = data.frame(age=alcohol$age)
+alcohol$age[alcohol['age'] >= 20] = 20 #changing all ages above 20 to 20
+
+#key: 1 = 0=0; 1=1:2, 2=3:6, 3= >6
+#binning the absences variable 
+old.absences = data.frame(absences= alcohol$absences)
+alcohol$absences = alcohol%>% dplyr::select(absences) %>% mutate(ab = cut(absences, breaks=c(0,0.1, 2,6, 75), include.lowest = T, labels=c(0,1,2,3))) %>% dplyr::select(ab)
+alcohol$absences = factor(unlist(alcohol$absences, use.names=F), order=T)
+
+#converting the response to tertiary for now
+alcohol$consump = cut(alcohol$alc_con,
+                  breaks=c(0,3,5,10),
+                  labels=c("low", "medium", "high")
+)
+alcohol$consump = factor(unlist(alcohol$consump, use.names=F), order=T)
+alcohol = subset(alcohol, select=-alc_con)
+```
+
+```{r splitting the data into test/train for tertiary response}
+set.seed(261)
+sample <- sample(c(TRUE, FALSE), nrow(alcohol), replace=TRUE, prob=c(0.7,0.3))
+train =alcohol[sample,]
+test = alcohol[!sample,]
+```
+
+```{r cumulative logit}
+ord = vglm(consump~., family = cumulative(parallel = T), data = train)
+
+#choosing the highest probability category for each obs
+pred = predict(ord, test, type="response") 
+resp = c() 
+for (p in 1:nrow(pred)) {
+  p = pred[p,]
+  r = rank(p)
+  ans = ifelse(r["low"] == 3, "low", ifelse(r["medium"] == 3, "medium", "high"))
+  resp = append(resp, ans)
+}
+
+pred.ord = factor(unlist(resp, use.names=F), order=T, levels=c("low", "medium", "high"))
+accu.ord = mean(pred.ord == test$consump)
+
+
+#stepAIC for vglms
+step.ord = step4vglm(ord)
+
+pred = predict(step.ord, test, type="response") 
+resp = c()
+for (p in 1:nrow(pred)) {
+  p = pred[p,]
+  r = rank(p)
+  ans = ifelse(r["low"] == 3, "low", ifelse(r["medium"] == 3, "medium", "high"))
+  resp = append(resp, ans)
+}
+pred.stepord = factor(unlist(resp, use.names=F), order=T, levels=c("low", "medium", "high"))
+accu.stepord = mean(pred.stepord == test$consump)
+
+
+#auc for stepAIC is less than regular model
+rocplot.ord = multiclass.roc(consump~fitted(ord), data=train, levels=c("low", "medium", "high"))
+auc_mod.ord = auc(rocplot.ord)
+
+
+#auc for stepAIC is less than regular model
+rocplot.stepord = multiclass.roc(consump~fitted(step.ord), data=train, levels=c("low", "medium", "high"))
+auc_mod.stepord = auc(rocplot.stepord)
+
+```
+
+```{r preprocessing for binary response}
+#recoding the reponse variable into a binary variable
+ter.response = data.frame(consump=alcohol$consump) 
+alcohol$consump = cut(response$alc_con,
+                  breaks=c(0,3,10),
+                  labels=c("low", "high")
+)
+set.seed(261)
+sample <- sample(c(TRUE, FALSE), nrow(alcohol), replace=TRUE, prob=c(0.7,0.3))
+train =alcohol[sample,]
+test = alcohol[!sample,]
+```
+
+```{r glm for binary response}
+#creating logistic model
+mod.glm = glm(consump~., family=binomial, data=train)
+
+rocplot.glm = roc(consump~fitted(mod.glm), data=train)
+auc_mod.glm = auc(rocplot.glm)
+
+#predicting the responces of the test data using the inital logit model
+pred = predict(mod.glm, test, type="r") 
+pred.glm = ifelse(pred<0.5, "low", "high")
+accu.glm = mean(pred.glm == test$consump)
+
+
+#creating new logistic model using stepAIC for variable selection
+step.glm = stepAIC(mod.glm, direction="backward")
+
+rocplot.stepglm = roc(consump~fitted(step.glm), data=train)
+auc_mod.stepglm = auc(rocplot.stepglm)
+
+#predicting the responses of test data using the stepAIC model
+pred = predict(step.glm, test, type="r") 
+pred.stepglm = ifelse(pred<0.5, "low", "high")
+accu.stepglm = mean(pred.stepglm == test$consump)
+
+```
+
+```{r probit model for binary response}
+#creating inital probit model
+mod.probit = glm(consump~., family=binomial(link="probit"), data=train)
+
+rocplot.probit = roc(consump~fitted(mod.probit), data=train)
+auc_mod.probit = auc(rocplot.probit)
+
+#predicting test responses using initial probit
+pred = predict(mod.probit, test, type="r") 
+pred.probit = ifelse(pred<0.5, "low", "high")
+accu.probit = mean(pred.probit == test$consump)
+
+
+#creating probit model using stepAIC
+step.probit = stepAIC(mod.probit, direction="backward")
+
+rocplot.stepprobit = roc(consump~fitted(step.probit), data=train)
+auc_mod.stepprobit = auc(rocplot.stepprobit)
+
+#predicting responses using improved probit model
+pred = predict(step.probit, test, type="r") 
+pred.stepprobit = ifelse(pred<0.5, "low", "high")
+accu.stepprobit = mean(pred.stepprobit == test$consump)
+
+```
+
+```{r gam for binary response}
+#creating a gam model
+mod.gam = gam::gam(consump~., family=binomial, data=train)
+
+rocplot.gam = roc(consump~fitted(mod.gam), data=train)
+auc_mod.gam = auc(rocplot.gam)
+
+#predicting responses for gam
+pred = predict(mod.gam, test, type="r") 
+pred.gam = ifelse(pred<0.5, "low", "high")
+accu.gam = mean(pred.gam == test$consump)
+
+
+#creating a gam model using only significant variables
+new.gam = gam::gam(consump~goout+health+absences+famrel+studytime+Fjob+Fedu+Medu+famsize+age+sex, family=binomial, data=train)
+
+rocplot.newgam = roc(consump~fitted(new.gam), data=train)
+auc_mod.newgam = auc(rocplot.gam)
+
+
+#predicting responses using improved gam model
+pred = predict(new.gam, test, type="r") 
+pred.newgam = ifelse(pred<0.5, "low", "high")
+accu.newgam = mean(pred.newgam == test$consump)
+
+
+#not working
+#step.Gam(mod.gam, gam.scope(alcohol, response=32))
+#s.mod = stepAIC(g.mod, method="both")
+
+```
+
+################################################################# 
+
+# Introduction - start of report
+
+# Appendix A
+
+```{r appendix}
+#beginning of Appendix Code
+knitr::opts_chunk$set(include = T)
+knitr::opts_chunk$set(echo = F)
+
+prez.alcohol = alcohol
+prez.alcohol$consump = response$alc_con
+
+#TODO decide if we should place the "Figure X" header before or after the figure itself
+```
+
+### Figure 1: EDA on Pre-Binned Absences Variable
+```{r figure 1}
+#EDA on Pre-Binned Absences Variable
+
+ggplot(old.absences, aes(absences)) + 
+  geom_histogram(binwidth=1) + ggtitle("Distribution of Pre-Binned Absences Variable")
+
+ggplot(old.absences, aes(y=absences)) + 
+  geom_boxplot() + ggtitle("Boxplot of Pre-Binned Absences Variable")
+
+kable(describe(as.numeric(unlist(old.absences$absences)), quant=c(0.25,0.75)), caption="Descriptive Statistics for Pre-Binned Absences Variable")
+```
+
+### Figure 2: EDA on the Age Variable (Binned)
+```{r figure 2}
+#eda on the Age Variable
+ggplot(old.age, aes(age)) + 
+  geom_histogram(binwidth = 0.5) + ggtitle("Distribution of Pre-Binned Age Variable")
+
+kable(prop.table(table(Age = prez.alcohol$age)), caption="Proportion of Student Age after Binning") #proportion of each student age after it was binned 
+#TODO maybe dont include this proportion table 
+```
+
+
+###Figure 3:Pair Plots of variables with WEAKER than expected correlation
+```{r figure 3}
+pairs(prez.alcohol[c('consump', 'age', 'Medu', 'Fedu', 'famrel', 'health')], pch=19, col='orange', lower.panel=panel.smooth)
+```
+
+###Figure 4:Pair Plots of variables with STRONGER than expected correlation
+```{r figure 4}
+pairs(prez.alcohol[c('consump', 'goout', 'freetime', 'sex', 'studytime')], pch=19, col='orange', lower.panel=panel.smooth)
+```
+
+### Figure 5: Relationship between Alcohol Consumption and Goout Variable
+```{r figure 5}
+#eda on Relationship between Alcohol Consumption and Goout Variable
+mosaicplot(table(prez.alcohol$goout, prez.alcohol$consump), shade=T, main="Alcohol Consumption and Going Out")
+```
+
+### Figure 6: Relationship between Alcohol Consumption and Freetime Variable
+```{r figure 6}
+#eda on Relationship between Alcohol Consumption and Freetime Variable
+mosaicplot(table(prez.alcohol$freetime, prez.alcohol$consump), shade=T, main="Alcohol Consumption and Free time")
+```
+
+### Figure 7: Relationship between Alcohol Consumption and Studytime Variable
+```{r figure 7}
+#eda on Relationship between Alcohol Consumption and Freetime Variable
+mosaicplot(table(prez.alcohol$studytime, prez.alcohol$consump), shade=T, main="Alcohol Consumption and Study time")
+```
+
+### Figure 8: Relationship between Ordinal Alcohol Consumption by Sex
+```{r figure 8}
+#eda on Relationship between Ordinal Alcohol Consumption by Sex
+mosaicplot(table(prez.alcohol$sex, prez.alcohol$consump), shade=T, main="Alcohol Consumption and Study time")
+```
+
+
+### ****Figure 9: Relationship between Ordinal Alcohol Consumption by Age
+```{r figure 9}
+#eda on Relationship between Ordinal Alcohol Consumption by Age
+cont.age = table(prez.alcohol$age, prez.alcohol$consump)
+mosaicplot(cont.age, shade=T, main='Mosaic Plot of Age and Alcohol Consumption')
+
+ggplot(prez.alcohol, aes(x=factor(consump), y=age)) + 
+  geom_boxplot() + ggtitle("Boxplot of Alcohol Consumption by Age") + xlab("Alcohol Consumption") + ylab("Age")
+```
+
+
+### Figure 9: EDA on Ordinal Alcohol Consumption
+```{r figure 9}
+#eda on ordinal alcohol consumption
+kable(describe(response$alc_con, quant=c(0.25,0.75)), caption="Descriptive Statistics for Ordinal Alcohol Consumption")
+
+ggplot(response, aes(alc_con)) + 
+  geom_histogram(binwidth = 0.5) + ggtitle("Distribution of Ordinal Alcohol Consumption") + xlab("Alcohol Consumption")
+```
+
+### Figure 10: EDA on Tertiary Alcohol Consumption
+```{r figure 10}
+#eda on Tertiary Alcohol Consumption
+kable(describe(as.numeric(unlist(ter.response$consump)), quant=c(0.25,0.75)), caption="Descriptive Statistics for Tertiary Alcohol Consumption")
+
+ggplot(ter.response, aes(as.numeric(consump))) + 
+  geom_histogram(binwidth = 0.5) + ggtitle("Distribution of Tertiary Alcohol Consumption") + xlab("Alcohol Consumption")
+```
+
+### Figure 11: EDA on Binary Alcohol Consumption
+```{r figure 11}
+#eda on binary alcohol consumption
+ggplot(alcohol, aes(as.numeric(consump))) + 
+  geom_histogram(binwidth = 0.5) + ggtitle("Distribution of Binary Alcohol Consumption") + xlab("Alcohol Consumption")
+
+```
+
+# EDA - delete this
+```{r eda}
+#TODO delete this code chunk once everything has been organized into separate figures
+
+#TODO add main pairs plot that melchor made of all the important variables from the presentation
+
+#TODO add any other plots/graphs/tables that melchor thinks are important to add or that we want to talk about in our report
+
+```
+
+### Figure X: Initial Cumulative Logit Model Metrics
+```{r figure x}
+#TODO rename this figure
+
+#for original model
+a = Anova(ord)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+
+summary(ord) #TODO see if we can find out another way to print this more prettily, otherwise its fine as is
+
+kable(addmargins(table(predicted = pred.ord, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using Inital Cumulative Logit Model")
+
+
+kable(data.frame("Accuracy on Test Data" = accu.ord, "AUC from ROC Curve"= auc_mod.ord), caption="Various Metrics from the Inital Cumulative Logit Model")
+
+#plotting not working for the multiclass.rocplot method
+#plot(rocplot.ord)
+
+```
+
+### Figure X: Improved Cumulative Logit Model Metrics
+```{r figure x}
+#TODO rename figure
+
+#for the stepAIC model
+a = Anova(step.ord)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+summary(step.ord)
+
+
+kable(addmargins(table(predicted = pred.stepord, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using Improved Cumulative Logit Model")
+
+kable(data.frame("Accuracy on Test Data" = accu.stepord, "AUC from ROC Curve"= auc_mod.stepord), caption="Various Metrics from the Improved Cumulative Logit Model")
+
+#plot(rocplot.stepord)
+
+```
+
+
+### Figure X: Model Metrics for Inital GLM
+```{r figure x}
+#TODO rename figure
+#for original glm
+
+a = Anova(mod.glm)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+
+summary(mod.glm) #TODO maybe change this to a more pretty knitted output
+
+
+plot(rocplot.glm, main="Plot of the ROC Curve for the Initial GLM")
+
+kable(addmargins(table(predicted = pred.glm, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using Initial Logit Model")
+
+kable(data.frame("Accuracy on Test Data" = accu.glm, "AUC from ROC Curve"= auc_mod.glm), caption="Various Metrics from the Inital Logit Model")
+
+```
+
+
+
+### Figure X: Model Metrics for Improved GLM
+```{r}
+#TODO rename figure
+#for stepAIC glm
+
+#TODO the output for this looks weird, try to make it look better
+a = Anova(step.glm)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+summary(step.glm)
+
+plot(rocplot.stepglm, main="Plot of the ROC Curve for the Improved GLM")
+
+kable(addmargins(table(predicted = pred.stepglm, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using the Improved Logit Model")
+
+kable(data.frame("Accuracy on Test Data" = accu.stepglm, "AUC from ROC Curve"= auc_mod.stepglm), caption="Various Metrics from the Improved Logit Model")
+
+```
+
+
+### Figure X: Model Metrics for Initial Probit
+```{r}
+#TODO rename figure
+
+#original probit model
+a = Anova(mod.probit)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+summary(mod.probit)
+
+plot(rocplot.probit, main="Plot of the ROC Curve for the Inital Probit")
+
+kable(addmargins(table(predicted = pred.probit, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using the Inital Probit Model")
+
+kable(data.frame("Accuracy on Test Data" = accu.probit, "AUC from ROC Curve"=auc_mod.probit), caption="Various Metrics from the Inital Probit Model")
+
+```
+
+
+### Figure X: Model Metrics for the Improved Probit
+```{r}
+#TODO rename figure
+
+#stepAIC probit model
+
+a = Anova(step.probit)
+a = as.data.frame(a)
+a$Sig = ifelse(a$`Pr(>Chisq)`<= 0.001, "***", ifelse(a$`Pr(>Chisq)`<= 0.01, "**", ifelse(a$`Pr(>Chisq)`<= 0.05, "*", ifelse(a$`Pr(>Chisq)`<= 0.1, ".", " "))))
+kable(a, caption="Analysis of Deviance Table (Type II tests)")
+
+summary(step.probit)
+
+plot(rocplot.stepprobit, main="Plot of the ROC Curve for the Improved Probit")
+
+kable(addmargins(table(predicted = pred.stepprobit, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using the Improved Probit Model")
+
+kable(data.frame("Accuracy on Test Data" = accu.stepprobit, "AUC from ROC Curve"=auc_mod.stepprobit), caption="Various Metrics from the Improved Probit Model")
+
+```
+
+
+### Figure X: Model Metrics for the Inital GAM
+```{r}
+#TODO rename figure
+summary(mod.gam)
+plot(rocplot.gam, main="Plot of the ROC Curve for the Initial GAM")
+
+kable(addmargins(table(predicted = pred.gam, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using the Initial GAM")
+
+kable(data.frame("Accuracy on Test Data" = accu.gam, "AUC from ROC Curve"=auc_mod.gam), caption="Various Metrics from the Initial GAM")
+
+```
+
+
+### Figure X: Model Metrics for the Improved GAM
+```{r}
+summary(new.gam)
+plot(rocplot.newgam, main="Plot of the ROC Curve for the Improved GAM")
+
+
+kable(addmargins(table(predicted = pred.newgam, actual = test$consump)), caption="Contingency Table of Predicted vs. Actual Values using the Improved GAM")
+
+kable(data.frame("Accuracy on Test Data" = accu.newgam, "AUC from ROC Curve"=auc_mod.newgam), caption="Various Metrics from the Improved GAM")
+```
+
+### Figure X: Comparing Model Metrics
+```{r}
+metrics = data.frame("Model" = c("Initial Cummulative Logit", "Improved Cumulative Logit", "Initial GLM", "Improved GLM", "Inital Probit Model",
+                                 "Improved Probit Model", "Inital GAM", "Improved GAM"),
+                     "AUC" = c(auc_mod.ord, auc_mod.stepord, auc_mod.glm, auc_mod.stepglm, auc_mod.probit, auc_mod.stepprobit, auc_mod.gam, auc_mod.newgam), 
+                     "Accuracy on Test Data" = c(accu.ord, accu.stepord, accu.glm, accu.stepglm, accu.probit, accu.stepprobit, accu.gam, accu.newgam))
+
+kable(metrics)
+```
+
+
+# Appendix B
+
+### Code
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+#this chunk prints out all of the code
+```
